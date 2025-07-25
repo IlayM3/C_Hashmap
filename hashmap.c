@@ -1,3 +1,5 @@
+#pragma GCC optimize("O3")
+
 #include "hashmap.h"
 
 /**
@@ -10,9 +12,8 @@ unsigned long hash(const char* string)
     unsigned long hash_val = 5381; // DJB2
     int c;
 
-    
     while ((c = *string++)) {
-        // hash * 33 + c 
+        // hash * 33 + c
         hash_val = ((hash_val << 5) + hash_val) + c;
     }
 
@@ -40,6 +41,7 @@ hashmap* c_hashmap(int size)
     }
 
     map->size = size;
+    map->count = 0; // Initialize count to 0
     // Allocate memory for the array of bucket pointers and initialize them to NULL
     map->buckets = calloc(size, sizeof(pair*)); // calloc initializes memory to zero (NULL for pointers)
     if (!map->buckets) {
@@ -75,7 +77,7 @@ HashMapStatus put(hashmap* map, const char *key, int value)
         if (strcmp(current->key, key) == 0) {
             // Key found, update its value and return
             current->value = value;
-            return HM_SUCCESS; 
+            return HM_SUCCESS;
         }
         current = current->next;
     }
@@ -84,15 +86,15 @@ HashMapStatus put(hashmap* map, const char *key, int value)
     pair* new_pair = malloc(sizeof(pair));
     if (!new_pair) {
         perror("Error: Failed to allocate memory for new pair");
-        return HM_ERR_MALLOC_FAILED; 
+        return HM_ERR_MALLOC_FAILED;
     }
 
     // Allocate memory for the key string and copy it
-    new_pair->key = malloc(strlen(key) + 1); 
+    new_pair->key = malloc(strlen(key) + 1);
     if (!new_pair->key) {
         perror("Error: Failed to allocate memory for key string");
-        free(new_pair); 
-        return HM_ERR_MALLOC_FAILED; 
+        free(new_pair);
+        return HM_ERR_MALLOC_FAILED;
     }
     strcpy(new_pair->key, key);
 
@@ -100,8 +102,18 @@ HashMapStatus put(hashmap* map, const char *key, int value)
     // Insert the new pair at the head of the linked list in the bucket
     new_pair->next = map->buckets[index];
     map->buckets[index] = new_pair;
+    map->count++; // Increment count when a new pair is added
 
-    return HM_SUCCESS; 
+    // If a new pair was successfully added (map->count was incremented):
+    if (LOAD_FACTOR(map) > MAX_FACTOR) {
+        HashMapStatus status = resize(map);
+        if (status != HM_SUCCESS) {
+            fprintf(stderr, "Warning: Hashmap resize failed after put.\n");
+            return HM_ERR_REHASHING_FAILED;
+        }
+    }
+
+    return HM_SUCCESS;
 }
 
 /**
@@ -132,7 +144,7 @@ HashMapStatus get(const hashmap* map, const char *key, int *value)
         current = current->next;
     }
 
-    return HM_ERR_KEY_NOT_FOUND; 
+    return HM_ERR_KEY_NOT_FOUND;
 }
 
 /**
@@ -167,13 +179,76 @@ HashMapStatus delete_key(hashmap* map, const char *key)
             // Free the memory for the key string and the pair structure
             free(current->key);
             free(current);
-            return HM_SUCCESS; 
+            map->count--; // Decrement count when a pair is deleted
+            return HM_SUCCESS;
         }
         prev = current;      // Move prev to current
         current = current->next; // Move current to next
     }
 
     return HM_ERR_KEY_NOT_FOUND;
+}
+
+/**
+ * @brief Resizes the hashmap by creating a new, larger array of buckets
+ * and re-hashing all existing key-value pairs into the new structure.
+ * @param map A pointer to the hashmap to be resized.
+ * @return HashMapStatus indicating success or failure type.
+ */
+HashMapStatus resize(hashmap* map)
+{
+    // Validate input
+    if (!map) {
+        fprintf(stderr, "Error: Invalid hashmap provided to resize.\n");
+        return HM_ERR_INVALID_ARG;
+    }
+
+    // Calculate the new size (double the current size)
+    size_t newSize;
+    if (__builtin_mul_overflow(map->size, 2, &newSize)) {
+        fprintf(stderr, "Error: Cannot resize hashmap - size overflow.\n");
+        return HM_ERR_SIZE_LIMIT;
+    }
+
+    // Allocate memory for the new array of buckets and initialize to NULL
+    pair** newBuckets = calloc(newSize, sizeof(pair*));
+    if (!newBuckets) {
+        fprintf(stderr, "Error: Failed to allocate memory for new buckets during resize.\n");
+        return HM_ERR_MALLOC_FAILED;
+    }
+
+    // Store old buckets and old size before modifying the map structure
+    pair** oldBuckets = map->buckets;
+    int oldSize = map->size;
+
+    // Update map's properties to the new values immediately.
+    map->size = newSize;
+    map->buckets = newBuckets;
+    map->count = 0; 
+
+    // Iterate through each bucket in the old hashmap
+    for (int i = 0; i < oldSize; i++) {
+        pair* current = oldBuckets[i];
+        // Traverse the linked list in the current old bucket
+        while (current) {
+            pair* temp = current;
+            current = current->next; // Move to the next pair in the old list before processing temp
+
+            // Calculate the new index for the current pair's key in the new hashmap
+            unsigned long newIndex = HASH_INDEX(temp->key, map->size); 
+
+            // Insert the current pair (temp) at the head of the linked list
+            // in the appropriate new bucket. 
+            temp->next = map->buckets[newIndex];
+            map->buckets[newIndex] = temp;
+            map->count++; // Increment count for each re-inserted element
+        }
+    }
+
+    // Free the memory allocated for the old array of buckets
+    free(oldBuckets);
+
+    return HM_SUCCESS;
 }
 
 /**
